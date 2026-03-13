@@ -11,19 +11,50 @@ type KyvernoPolicyExpander struct{}
 
 const (
 	kyvernoAPIVersion             = "kyverno.io/v1"
-	kyvernoClusterKind            = "ClusterPolicy"
+	kyvernoPolicyAPIVersion       = "policies.kyverno.io/v1"
 	kyvernoPolicyReportAPIVersion = "wgpolicyk8s.io/v1alpha2"
-	kyvernoNamespacedKind         = "Policy"
+	clusterPolicyReportKind       = "ClusterPolicyReport"
+	namespacedPolicyReportKind    = "PolicyReport"
+	kyvernoNamespaceScope         = "namespace"
+	kyvernoClusterScope           = "cluster"
 )
 
-// CanHandle determines if the manifest is a Kyverno policy that can be expanded.
-func (k KyvernoPolicyExpander) CanHandle(manifest map[string]interface{}) bool {
-	if a, _, _ := unstructured.NestedString(manifest, "apiVersion"); a != kyvernoAPIVersion {
+// kyvernoPolicyScopes defines all supported Kyverno policy kinds and their scopes.
+var kyvernoPolicyScopes = map[string]string{
+	// Legacy kinds (kyverno.io/v1)
+	"ClusterPolicy": kyvernoClusterScope,
+	"Policy":        kyvernoNamespaceScope,
+	// New kinds (policies.kyverno.io/v1)
+	"ValidatingPolicy":                kyvernoClusterScope,
+	"MutatingPolicy":                  kyvernoClusterScope,
+	"GeneratingPolicy":                kyvernoClusterScope,
+	"ImageValidatingPolicy":           kyvernoClusterScope,
+	"NamespacedValidatingPolicy":      kyvernoNamespaceScope,
+	"NamespacedMutatingPolicy":        kyvernoNamespaceScope,
+	"NamespacedGeneratingPolicy":      kyvernoNamespaceScope,
+	"NamespacedImageValidatingPolicy": kyvernoNamespaceScope,
+}
+
+// isValidKyvernoKind checks if the apiVersion and kind represent a supported Kyverno policy.
+func isValidKyvernoKind(apiVersion, kind string) bool {
+	_, exists := kyvernoPolicyScopes[kind]
+	if !exists {
 		return false
 	}
 
+	if kind == "ClusterPolicy" || kind == "Policy" {
+		return apiVersion == kyvernoAPIVersion
+	}
+
+	return apiVersion == kyvernoPolicyAPIVersion
+}
+
+// CanHandle determines if the manifest is a Kyverno policy that can be expanded.
+func (k KyvernoPolicyExpander) CanHandle(manifest map[string]interface{}) bool {
+	apiVersion, _, _ := unstructured.NestedString(manifest, "apiVersion")
 	kind, _, _ := unstructured.NestedString(manifest, "kind")
-	if kind != kyvernoClusterKind && kind != kyvernoNamespacedKind {
+
+	if !isValidKyvernoKind(apiVersion, kind) {
 		return false
 	}
 
@@ -45,10 +76,19 @@ func (k KyvernoPolicyExpander) Expand(
 	manifest map[string]interface{}, severity string,
 ) []map[string]interface{} {
 	templates := []map[string]interface{}{}
-	// This was previously validated in the CanHandle method.
 	policyName, _, _ := unstructured.NestedString(manifest, "metadata", "name")
+	kind, _, _ := unstructured.NestedString(manifest, "kind")
 
 	configPolicyName := "inform-kyverno-" + policyName
+
+	// Determine report kind
+	scope := kyvernoPolicyScopes[kind]
+	reportKind := clusterPolicyReportKind
+
+	if scope == kyvernoNamespaceScope {
+		reportKind = namespacedPolicyReportKind
+	}
+
 	configurationPolicy := map[string]interface{}{
 		"objectDefinition": map[string]interface{}{
 			"apiVersion": configPolicyAPIVersion,
@@ -66,20 +106,7 @@ func (k KyvernoPolicyExpander) Expand(
 						"complianceType": "mustnothave",
 						"objectDefinition": map[string]interface{}{
 							"apiVersion": kyvernoPolicyReportAPIVersion,
-							"kind":       kyvernoClusterKind + "Report",
-							"results": []map[string]interface{}{
-								{
-									"policy": policyName,
-									"result": "fail",
-								},
-							},
-						},
-					},
-					{
-						"complianceType": "mustnothave",
-						"objectDefinition": map[string]interface{}{
-							"apiVersion": kyvernoPolicyReportAPIVersion,
-							"kind":       kyvernoNamespacedKind + "Report",
+							"kind":       reportKind,
 							"results": []map[string]interface{}{
 								{
 									"policy": policyName,
